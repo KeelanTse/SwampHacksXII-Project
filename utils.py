@@ -1,19 +1,103 @@
 import base64
 import json
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
 import streamlit as st
+from google import genai
+from google.genai import types
 
 ROOT = Path(__file__).parent
+
+# gemini-1.5-flash has been shut down by Google, which is why every search errored.
+# Keep the model name in ONE place so app.py / web_app.py / utils.py never drift apart.
+MODEL = "gemini-3.8-flash"
+
+# Always use Gainesville time. datetime.now() alone uses the *server's* clock,
+# which is UTC on Streamlit Cloud (4-5 hours off).
+try:
+    UF_TZ = ZoneInfo("America/New_York")
+except Exception:  # Windows without the `tzdata` package -> fall back to the computer's clock
+    UF_TZ = None
+
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
 
 @st.cache_data
 def img_to_base64(path) -> str:
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode()
-    
+
+
 @st.cache_data
 def load_spots():
     with open(ROOT / "foodspots.json") as f:
         return json.load(f)
+
+
+@st.cache_resource
+def get_client():
+    """Create the Gemini client once (not on every rerun), with a clear error if the key is missing."""
+    try:
+        api_key = st.secrets["API_KEY"]
+    except (KeyError, FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
+        raise RuntimeError(
+            'No API_KEY found. Create .streamlit/secrets.toml next to FrontPage.py '
+            'containing:  API_KEY = "your-gemini-key"'
+        )
+    return genai.Client(api_key=api_key)
+
+
+# ---------- time-of-day helpers ----------
+
+def now_at_uf() -> datetime:
+    return datetime.now(UF_TZ)
+
+
+def _minutes(hhmm: str) -> int:
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
+
+
+def pretty_time(hhmm: str) -> str:
+    """'21:30' -> '9:30pm', '00:00' -> '12am'."""
+    h, m = map(int, hhmm.split(":"))
+    suffix = "am" if h < 12 else "pm"
+    h = h % 12 or 12
+    return f"{h}{suffix}" if m == 0 else f"{h}:{m:02d}{suffix}"
+
+
+def open_status(spot: dict, now: datetime | None = None) -> tuple[bool, str]:
+    """Return (is_open, label) e.g. (True, 'Open now · until 9pm') or (False, 'Closed · opens 11am').
+
+    Handles hours that run past midnight like "11:00-02:00": at 1am Saturday,
+    Friday's hours are the ones that count.
+    """
+    now = now or now_at_uf()
+    t = now.hour * 60 + now.minute
+    today = DAYS[now.weekday()]
+    yesterday = DAYS[(now.weekday() - 1) % 7]
+
+    # 1) Still open from last night's late shift?
+    prev = spot["hours"].get(yesterday, "closed")
+    if prev != "closed":
+        start, end = prev.split("-")
+        if _minutes(end) <= _minutes(start) and t < _minutes(end):
+            return True, f"Open now · until {pretty_time(end)}"
+
+    # 2) Today's hours
+    hours = spot["hours"].get(today, "closed")
+    if hours == "closed":
+        return False, "Closed today"
+    start, end = hours.split("-")
+    s, e = _minutes(start), _minutes(end)
+    overnight = e <= s
+    if (overnight and t >= s) or (not overnight and s <= t < e):
+        return True, f"Open now · until {pretty_time(end)}"
+    if t < s:
+        return False, f"Closed · opens {pretty_time(start)}"
+    return False, "Closed for the day"
 
 
 def set_background():
@@ -164,15 +248,93 @@ def show_nav(current: str):
         for col, (label, path, icon) in zip(cols[1:4], pages):
             with col:
                 with st.container(key=f"nav_{label}"):
-                    st.page_link(path, label=label, icon=icon, use_container_width=True)
+                    st.page_link(path, label=label, icon=icon, width="stretch")
 
 
-def get_recommendations(query: str, spots: list) -> list:
-    # Placeholder: simple keyword match on tags and names.
-    # Replace with your real filtering / LLM logic.
-    words = query.lower().split()
-    matches = [
-        s for s in spots
-        if any(w in " ".join(s["tags"]).lower() or w in s["name"].lower() for w in words)
-    ]
-    return matches[:5] or spots[:5]
+# ---------- recommendations ----------
+
+_STOPWORDS = {"near", "need", "want", "with", "from", "between", "class", "classes",
+              "minutes", "under", "something", "food", "place", "places", "good", "have"}
+
+
+def _keyword_fallback(query: str, spots: list, now: datetime) -> list:
+    """Used only when Gemini is unreachable: rank OPEN spots by simple keyword overlap."""
+    words = {w.strip(",.!?$").lower() for w in query.split()}
+    words = {w for w in words if len(w) > 3 and w not in _STOPWORDS}
+
+    def score(s):
+        text = " ".join([s["name"], s["zone"], s["nearest_landmark"], *s["tags"]]).lower()
+        return sum(w in text for w in words)
+
+    open_spots = [s for s in spots if open_status(s, now)[0]] or spots
+    return sorted(open_spots, key=score, reverse=True)[:5]
+
+
+def get_recommendations(query: str, spots: list) -> tuple[list, str | None]:
+    """Return (matched_spots, error_message_or_None).
+
+    The error is returned instead of shown with st.error() because Search.py calls
+    st.switch_page() right after this, which wiped the error box before you could read it.
+    """
+    now = now_at_uf()
+
+    # Give Gemini everything it needs to judge budget, speed, location AND time of day.
+    spots_summary = []
+    for s in spots:
+        is_open, status = open_status(s, now)
+        spots_summary.append({
+            "id": s["id"],
+            "name": s["name"],
+            "zone": s["zone"],
+            "landmark": s["nearest_landmark"],
+            "price": s["price_range"],
+            "speed": s["speed"],
+            "tags": s["tags"],
+            "open_now": is_open,
+            "status": status,
+        })
+
+    system_prompt = f"""
+    You are an expert UF campus dining assistant.
+    The user will provide a location, craving, or constraint.
+    The current time in Gainesville is {now:%A %I:%M %p}.
+
+    CRITICAL GEOGRAPHY RULE: Use your general knowledge of the University of Florida campus to match
+    user locations (like "Turlington", "Lib West", etc.) to the nearest landmarks in our database
+    (like "Plaza of the Americas", "The Hub", "Marston", or "Midtown").
+
+    TIME RULE: Only pick spots where open_now is true, unless the user explicitly asks about a
+    different time. Use the time of day too (breakfast spots in the morning, late_night spots late).
+
+    BUDGET/SPEED: "$" is cheapest. If the user is short on time, prefer grab_and_go or quick.
+
+    Select up to 5 best matching restaurants, best match first.
+    Return ONLY a JSON array of their IDs. Example: ["uf-010", "uf-011"]
+
+    RESTAURANTS:
+    {json.dumps(spots_summary)}
+    """
+
+    try:
+        response = get_client().models.generate_content(
+            model=MODEL,
+            contents=f"User Query: {query}",
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.0,
+                response_mime_type="application/json",
+                response_schema=list[str],  # forces a plain list of ID strings
+            ),
+        )
+        selected_ids = response.parsed if response.parsed is not None else json.loads(response.text)
+
+        by_id = {s["id"]: s for s in spots}
+        matched = [by_id[i] for i in selected_ids if i in by_id]  # keep Gemini's ranking order
+        if matched:
+            return matched, None
+        return _keyword_fallback(query, spots, now), "Gemini didn't find a match, so these are the closest keyword matches."
+
+    except Exception as e:
+        print(f"[SwampSnacks] Gemini error: {e!r}")  # full details in your terminal
+        return _keyword_fallback(query, spots, now), f"AI is unavailable right now ({e}). Showing keyword matches instead."
+

@@ -1,52 +1,72 @@
-from flask import Flask, render_template, request, jsonify
-from google import genai
-from google.genai import types
+"""Flask version of SwampSnacks that uses the browser's GPS location.
+
+Run from the project folder:   python web_app.py
+Needs:  templates/index.html   (Flask only looks for templates in a folder called "templates")
+        .streamlit/secrets.toml with API_KEY = "..."
+"""
 import json
-from datetime import datetime
-from database import restaurant_database
+from pathlib import Path
+
+from flask import Flask, render_template, request, jsonify
+from google.genai import types
+
+from utils import MODEL, get_client, now_at_uf, open_status
 
 app = Flask(__name__)
 
-client = genai.Client(api_key="API KEY")
-db_string = json.dumps(restaurant_database, indent=2)
+# foodspots.json is the single source of truth (database.py was an exact copy of it)
+with open(Path(__file__).parent / "foodspots.json") as f:
+    SPOTS = json.load(f)
 
-system_prompt = f"""
+SYSTEM_PROMPT = """
 You are an expert UF campus dining assistant chatbot.
-Your job is to answer user questions using ONLY the provided restaurant database below.
-Do not assume or invent information not found in the database. If a match isn't found, state that politely.
-
-RESTAURANT DATABASE:
-{db_string}
+Answer using ONLY the restaurant database the user message gives you.
+Do not assume or invent information not found in the database. If a match isn't found, say so politely.
+Each spot has "open_now" and "status" fields that were calculated for the current time; trust them.
+Reply in plain text (no Markdown, no asterisks), because the web page shows it as plain text.
 """
 
-chat = client.chats.create(
-    model="gemini-3.8-flash",
-    config=types.GenerateContentConfig(
-        system_instruction=system_prompt,
-        temperature=0.0
-    )
-)
 
-@app.route('/')
+@app.route("/")
 def home():
-    return render_template('index.html')
+    return render_template("index.html")
 
-@app.route('/ask-gemini', methods=['POST'])
+
+@app.route("/ask-gemini", methods=["POST"])
 def ask_gemini():
-    data = request.get_json()
-    user_lat = data.get('latitude')
-    user_lon = data.get('longitude')
-    
-    live_time = datetime.now().strftime("%A, %I:%M %p")
-    zone_description = f"at coordinates Latitude {user_lat}, Longitude {user_lon} near the UF campus"
-    
-    user_message = f"[System Note: The current live time is {live_time}] [User Location: {zone_description}]. Using ONLY the restaurant database, find the 3 closest open dining spots to this location and give a brief recommendation for each."
-    
+    data = request.get_json(silent=True) or {}
+    user_lat = data.get("latitude")
+    user_lon = data.get("longitude")
+    if user_lat is None or user_lon is None:
+        return jsonify({"reply": "Missing location. Please allow location access and try again."}), 400
+
+    now = now_at_uf()
+    spots = []
+    for s in SPOTS:
+        is_open, status = open_status(s, now)
+        spots.append({**s, "open_now": is_open, "status": status})
+
+    user_message = (
+        f"Current time in Gainesville: {now:%A, %I:%M %p}\n"
+        f"User location: latitude {user_lat}, longitude {user_lon} (near the UF campus)\n\n"
+        "Using ONLY the database below, find the 3 closest dining spots that are open now "
+        "and give a brief recommendation for each.\n\n"
+        f"DATABASE:\n{json.dumps(spots)}"
+    )
+
     try:
-        response = chat.send_message(user_message)
+        # One independent request per click. The old shared `chat` object mixed every
+        # visitor's messages into one ever-growing conversation.
+        response = get_client().models.generate_content(
+            model=MODEL,
+            contents=user_message,
+            config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.0),
+        )
         return jsonify({"reply": response.text})
     except Exception as e:
-        return jsonify({"reply": f"Error communicating with AI: {str(e)}"})
+        print(f"[SwampSnacks] Gemini error: {e!r}")
+        return jsonify({"reply": f"Error communicating with AI: {e}"}), 502
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     app.run(debug=True)

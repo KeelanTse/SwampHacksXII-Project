@@ -67,5 +67,5 @@ st.markdown(
 # Center the button using columns
 left, middle, right = st.columns([2, 1, 2])
 with middle:
-    if st.button("Find my food 🐊", use_container_width=True, type="primary"):
+    if st.button("Find my food 🐊", width="stretch", type="primary"):
         st.switch_page("pages/Search.py")
