@@ -1,30 +1,5 @@
 [
   {
-    "id": "uf-001",
-    "name": "Chick-fil-A (Reitz Union)",
-    "zone": "Central Campus",
-    "nearest_landmark": "Reitz Union",
-    "price_range": "$",
-    "tags": [
-      "chicken",
-      "fast_food",
-      "sandwiches",
-      "gator_dining",
-      "on_campus"
-    ],
-    "hours": {
-      "mon": "07:30-21:00",
-      "tue": "07:30-21:00",
-      "wed": "07:30-21:00",
-      "thu": "07:30-21:00",
-      "fri": "07:30-21:00",
-      "sat": "10:30-17:00",
-      "sun": "closed"
-    },
-    "google_maps_url": "https://www.google.com/maps/search/?api=1&query=Chick-fil-A+Reitz+Union+Gainesville+FL",
-    "speed": "grab_and_go"
-  },
-  {
     "id": "uf-002",
     "name": "Panda Express (Reitz Union)",
     "zone": "Central Campus",
