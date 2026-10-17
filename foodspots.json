@@ -1,0 +1,28 @@
+[
+  {
+    "id": "krishna_lunch",
+    "name": "Krishna Lunch",
+    "zone": "On-Campus",
+    "nearest_landmark": "Plaza of the Americas",
+    "walk_time_from_turlington": "2 mins",
+    "price_range": "$",
+    "speed": "Instant (Under 5 mins)",
+    "tags": ["vegan", "vegetarian", "healthy", "cheap", "outdoor", "quick"],
+    "popular_items": ["Halava", "Daily Special (Curry/Tacos)"],
+    "hours": "Mon-Fri 11am-1:30pm",
+    "google_maps_url": "https://maps.google.com/?q=Krishna+Lunch+Gainesville"
+  },
+  {
+    "id": "flacos",
+    "name": "Flaco's Cuban Bakery",
+    "zone": "Downtown",
+    "nearest_landmark": "Downtown Plaza",
+    "walk_time_from_turlington": "20 mins (5 min scooter/bus)",
+    "price_range": "$",
+    "speed": "Fast (5-10 mins)",
+    "tags": ["late-night", "cuban", "empanadas", "pork", "savory"],
+    "popular_items": ["Arepas", "Cuban Sandwich", "Empanadas"],
+    "hours": "Daily 11am-2am",
+    "google_maps_url": "https://maps.google.com/?q=Flacos+Gainesville"
+  }
+]
